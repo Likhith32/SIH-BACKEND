@@ -8,11 +8,23 @@ import os
 from xgboost import XGBClassifier
 from sklearn.preprocessing import LabelEncoder
 import joblib
+import threading
+import warnings
 
+# =======================
+# Suppress XGBoost warnings
+# =======================
+warnings.filterwarnings(action='ignore', category=UserWarning)
+
+# =======================
+# Flask App
+# =======================
 app = Flask(__name__)
 CORS(app)
 
 MODEL_PATH = "health_model_xgb_dynamic.pkl"
+model = None
+le = None
 
 # Risk recommendations
 RISK_RECOMMENDATIONS = {
@@ -34,27 +46,25 @@ RISK_RECOMMENDATIONS = {
     }
 }
 
-# Train or load model
+# =======================
+# Train or Load Model
+# =======================
 def train_or_load_model():
     global model, le
     if os.path.exists(MODEL_PATH):
         model, le = joblib.load(MODEL_PATH)
         print("✅ Loaded trained XGBoost model from disk")
     else:
-        print("⚡ Training new dynamic XGBoost model...")
-        # Generate synthetic diverse dataset for symptoms + water quality
+        print("⚡ Training new dynamic XGBoost model in background...")
         np.random.seed(42)
-        X_train = []
-        y_train = []
+        X_train, y_train = [], []
         for _ in range(200):
-            # Symptoms (0 or 1)
             symptoms = np.random.randint(0, 2, 8).tolist()
-            # Water quality features
             pH = np.random.uniform(6.0, 9.0)
             turbidity = np.random.uniform(0, 100)
             coliform = np.random.randint(0, 500)
             X_train.append(symptoms + [pH, turbidity, coliform])
-            # Risk assignment logic
+
             score = sum(symptoms) + (turbidity > 50) + (coliform > 100) + (pH < 6.5 or pH > 8.5)
             if score <= 2:
                 y_train.append("Low")
@@ -82,11 +92,18 @@ def train_or_load_model():
         joblib.dump((model, le), MODEL_PATH)
         print("✅ Dynamic XGBoost model trained and saved")
 
-train_or_load_model()
+# Start model training in background thread
+threading.Thread(target=train_or_load_model, daemon=True).start()
 
-# Helper: make prediction
+# =======================
+# Prediction Helper
+# =======================
 def make_prediction(record):
-    # Features
+    global model, le
+    # Wait until model is loaded/trained
+    while model is None or le is None:
+        pass
+
     features = [
         record.get("Diarrhea", 0),
         record.get("Vomiting", 0),
@@ -106,9 +123,9 @@ def make_prediction(record):
     proba = model.predict_proba([features])[0]
     probability = int(max(proba) * 100)
 
-    # Only include symptoms that are present
     factors = [symptom for symptom in ["Diarrhea","Vomiting","Fever","AbdominalPain",
-               "Dehydration","Nausea","Headache","Fatigue"] if record.get(symptom, 0) == 1]
+                                       "Dehydration","Nausea","Headache","Fatigue"]
+               if record.get(symptom, 0) == 1]
 
     recommendation_data = RISK_RECOMMENDATIONS.get(risk_level, {
         "recommendation": "Follow general preventive measures",
@@ -129,8 +146,9 @@ def make_prediction(record):
         "affectedHouseholds": record.get("affectedHouseholds", 1)
     }
 
-
+# =======================
 # Routes
+# =======================
 @app.route("/predict", methods=["GET"])
 def predict_get():
     return "Use POST method with JSON data or upload a CSV file for predictions."
@@ -174,7 +192,11 @@ def predict_csv():
         return send_file(tmp_file.name, as_attachment=True, download_name="predicted_analysis.csv", mimetype="text/csv")
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))  # Use Render's port if available
-    app.run(debug=True, host="0.0.0.0", port=port)
 
+# =======================
+# Run Flask App
+# =======================
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))  # Render's port or 5000 locally
+    print(f"🚀 Starting Flask app on 0.0.0.0:{port}")
+    app.run(debug=True, host="0.0.0.0", port=port)
